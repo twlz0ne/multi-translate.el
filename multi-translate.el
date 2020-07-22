@@ -5,9 +5,9 @@
 ;; Author: Gong Qijian <gongqijian@gmail.com>
 ;; Created: 2020/07/10
 ;; Version: 0.1.0
-;; Package-Requires: ((emacs "24.4") (bing-dict "20200216.110") (google-translate "0.12") (youdao-dictionary "0.4") (sdcv "1.5.2"))
+;; Package-Requires: ((emacs "25.1") (bing-dict "20200216.110") (google-translate "0.12") (youdao-dictionary "0.4") (sdcv "1.5.2"))
 ;; URL: https://github.com/twlz0ne/multi-translate.el
-;; Keywords: tool
+;; Keywords: tools
 
 ;; This program is free software; you can redistribute it and/or modify
 ;; it under the terms of the GNU General Public License as published by
@@ -31,6 +31,7 @@
 ;;; Change Log:
 
 ;;  v0.1.0
+;;      * 2020/08/06  Add support for accumulating query results.
 ;;      * 2020/07/28  Add support for amending current query.
 ;;      * 2020/07/22  Add support for async request (bing & youdao).
 ;;      * 2020/07/22  Add support for sdcv to translate word locally.
@@ -91,6 +92,31 @@ a function that is called with a string and return a cons cell of language names
 (defvar multi-translate-result-buffer-name "*Multi Translate*"
   "Default name of translate result buffer.")
 
+(defcustom multi-translate-accumulate-results t
+  "Whether or not to accumulate translate results."
+  :type 'boolean
+  :group 'multi-translate)
+
+(defvar multi-translate--youdao-language-code-map
+  '(("zh-CN" . "zh-CHS"))
+  "Language code map of youdao dictionary.
+Each item is a cons cell of the form ‘(\"GENERAL-CODE\" . \"YOUDAO-CODE\")’.")
+
+(defvar multi-translate-log-p nil)
+
+(defsubst multi-translate-log (format &rest args)
+  (when multi-translate-log-p
+    (with-current-buffer (get-buffer-create "*Multi translate log*")
+      (goto-char (point-max))
+      (insert (apply #'format format args) "\n"))))
+
+(defun multi-translate-string-nil-p (&rest strings)
+  "Return no-nil if there are nils or empty strings in STRINGS."
+  (remove t (mapcar
+             (lambda (string)
+               (and (stringp string) (not (string-empty-p string))))
+             strings)))
+
 (defun multi-translate--generate-minibuffer-tooltip (key-desc-lists)
   "Generate propertized help doc KEY-DESC-LISTS from for minibuffer.
 
@@ -116,11 +142,6 @@ or:
            key-desc-lists)
    ", "))
 
-(defvar multi-translate--youdao-language-code-map
-  '(("zh-CN" . "zh-CHS"))
-  "Language code map of youdao dictionary.
-Each item is a cons cell of the form ‘(\"GENERAL-CODE\" . \"YOUDAO-CODE\")’.")
-
 (defun multi-translate--strip-youdao-translation (translation)
   (with-temp-buffer
     (insert translation)
@@ -132,11 +153,8 @@ Each item is a cons cell of the form ‘(\"GENERAL-CODE\" . \"YOUDAO-CODE\")’.
       (buffer-substring (point-min) (point-max)))))
 
 (defun multi-translate--strip-bing-sentence-translation (translation text)
-  (with-temp-buffer
-    (insert translation)
-    (goto-char (point-min))
-    (if (re-search-forward (format "Machine translation: %s -> " text) nil t)
-        (buffer-substring (point) (point-max)))))
+  (substring translation
+             (length (format "Machine translation: %s -> " text))))
 
 (defun multi-translate--format-bing-word-translation (translation)
   (pcase-let ((`(,word ,defs) (split-string translation ": ")))
@@ -159,6 +177,30 @@ Each item is a cons cell of the form ‘(\"GENERAL-CODE\" . \"YOUDAO-CODE\")’.
                        header)
     header))
 
+(defvar multi-translate--section-separator (char-to-string ?\^L)
+  "Default separator of sections.")
+
+(defun multi-translate--section-separator-p ()
+  "Return t if point at section separator."
+  (let ((separator-line (concat "^" multi-translate--section-separator "$")))
+    (or (looking-at-p separator-line)
+        (looking-back separator-line 1))))
+
+(defun multi-translate--separator-point-entered (old-pos cur-pos)
+  (cond ((< old-pos cur-pos) (forward-line))
+        ((> old-pos cur-pos) (forward-line -1)
+         (when-let ((ov (multi-translate--folded-translation-section)))
+           (goto-char (overlay-start ov))))))
+
+(defun multi-translate--insert-section-separator ()
+  "Insert separator of sections."
+  (insert ?\n
+          (propertize
+           multi-translate--section-separator
+           'face 'error
+           'point-entered #'multi-translate--separator-point-entered)
+          ?\n))
+
 (defun multi-translate--insert-header (lang-from lang-to text)
   (insert
    (format "Translate from ‘%s’ to ‘%s’:"
@@ -173,13 +215,16 @@ Each item is a cons cell of the form ‘(\"GENERAL-CODE\" . \"YOUDAO-CODE\")’.
                                                (format "%s" dictionary)))
           "\n")
   (let* ((fun (format "multi-translate--%s-translation" dictionary))
-         (trans (funcall (intern fun) lang-from lang-to text async-p)))
+         (result (condition-case err
+                    (funcall (intern fun) lang-from lang-to text async-p)
+                  (error (or (cdr err)
+                             (format "error: %s" (car err)))))))
     (goto-char (point-max))
-    (if (string-empty-p trans)
+    (if (string-empty-p result)
         (progn
           (insert (propertize "No results\n" 'face font-lock-warning-face))
           nil)
-      (insert trans)
+      (insert result)
       t)))
 
 (defun multi-translate-language-detect-zh-en (string)
@@ -218,15 +263,17 @@ Each item is a cons cell of the form ‘(\"GENERAL-CODE\" . \"YOUDAO-CODE\")’.
 
 (defun multi-translate--insert-async-result (dictionary placeholder result)
   "Replace PLACEHOLDER with RESULT of DICTIONARY in translation buffer."
-  (save-excursion
-    (let ((inhibit-read-only t))
-      (with-current-buffer multi-translate-result-buffer-name
-        (goto-char (point-min))
-        (if (re-search-forward placeholder nil t)
-            (replace-match (string-trim result))
-          (message "Result placeholder(%s) of %s not found!"
-                   placeholder
-                   dictionary))))))
+  (condition-case err
+      (save-excursion
+        (let ((inhibit-read-only t))
+          (with-current-buffer multi-translate-result-buffer-name
+            (goto-char (point-min))
+            (if (re-search-forward placeholder nil t)
+                (replace-match (string-trim result))
+              (message "Async insert error [%s]: placeholder(%s) not found"
+                       placeholder
+                       dictionary)))))
+    (error (message "Async insert error [%s]: %s" dictionary err))))
 
 (defun multi-translate--bing-dict-brief (word &optional callback)
   "Return the translation of WORD from Bing.
@@ -256,6 +303,165 @@ This function is mainly taken from `bing-dict-brief'."
                         `(,(decode-coding-string word 'utf-8))
                         t
                         t))))))
+
+;;; Navigation
+
+(defun multi-translate--beginning-of-translate-section-p ()
+  "Return t if at the beginning of the translate section."
+  (looking-back (concat "^" multi-translate--section-separator "\n") 1))
+
+(defun multi-translate--end-of-translate-section-p ()
+  "Return t if at the end of the translate section."
+  (looking-at-p (concat "\n" multi-translate--section-separator "$")))
+
+(defun multi-translate-beginning-of-translation-section ()
+  "Backward to beginning of translation section.
+Return the new point or nil if at the beginning of buffer."
+  (let* ((inhibit-point-motion-hooks t)
+         (regex (concat "^" multi-translate--section-separator "\n"))
+         (old-pos (point))
+         (new-pos
+          (progn
+            (when (looking-back regex 1)
+              (forward-line -1))
+            (if-let ((ov (multi-translate--folded-translation-section)))
+                (overlay-start ov)
+              (if (re-search-backward regex nil t)
+                  (progn
+                    (forward-line 1)
+                    (point))
+                (point-min))))))
+    (if (> old-pos new-pos)
+        (goto-char new-pos))))
+
+(defun multi-translate-end-of-translation-section ()
+  "Forward to end of translation section.
+Return the new point or nil if at the end of buffer."
+  (let* ((inhibit-point-motion-hooks t)
+         (regex (concat "\n" multi-translate--section-separator "$"))
+         (old-pos (point))
+         (new-pos
+          (progn
+            (when (looking-at-p regex)
+              (forward-line 1))
+            (if-let ((ov (multi-translate--folded-translation-section)))
+                (overlay-end ov)
+              (if (re-search-forward regex nil t)
+                  (progn
+                    (forward-line -1)
+                    (point))
+                (point-max))))))
+    (if (< old-pos new-pos)
+        (goto-char new-pos))))
+
+(defun multi-translate-next-translation-section ()
+  "Goto next translation section."
+  (interactive)
+  (let* ((regex (concat "^" multi-translate--section-separator "$"))
+         end-of-buffer)
+    (when (looking-at-p regex)
+      (unless (re-search-forward regex nil t)
+        (setq end-of-buffer t)))
+    (unless end-of-buffer
+      (re-search-forward regex nil t))))
+
+(defun multi-translate-prev-translation-section ()
+  "Goto previous translation section."
+  (interactive)
+  (let* ((regex (concat "^" multi-translate--section-separator "$"))
+         beginning-of-buffer)
+    (unless (looking-at-p regex)
+      (unless (re-search-backward regex nil t)
+        (setq beginning-of-buffer t)))
+    (unless beginning-of-buffer
+      (re-search-backward regex nil t))))
+
+(defun multi-translate-current-translation-section ()
+  "Region of current translation section."
+  (list
+   (cond ((= (point) (point-min)) (point-min))
+         ((looking-back (concat "^" multi-translate--section-separator "\n") 1) (point))
+         ((looking-at-p (concat "^" multi-translate--section-separator "$"))
+          (save-excursion
+            (forward-line)
+            (point)))
+         (t (save-excursion
+              (multi-translate-beginning-of-translation-section))))
+   (cond ((= (point) (point-max)) (point-max))
+         ((looking-at-p (concat "\n" multi-translate--section-separator "$")) (point))
+         (t (save-excursion
+              (multi-translate-end-of-translation-section))))))
+
+;;; Folding
+
+(defface multi-translate-section-fold-face
+  '((t (:inherit success)))
+  "Default face for folded section."
+  :group 'multi-translate)
+
+(defun multi-translate-open-translation-section (&optional ov)
+  "Show the body of current translation section or folded OV."
+  (interactive)
+  (if ov 
+      (remove-overlays (overlay-start ov) (overlay-end ov) 'invisible t)
+    (let* ((section (multi-translate-current-translation-section)))
+      (remove-overlays (car section) (cadr section) 'invisible t))))
+
+(defun multi-translate-fold-translation-section ()
+  "Hide the body of current translation section."
+  (interactive)
+  (let* ((section (multi-translate-current-translation-section))
+         (query-info (save-excursion
+                       (goto-char (car section))
+                       (multi-translate--query-text-and-languages)))
+         (o (progn
+              (remove-overlays (car section) (cadr section) 'invisible t)
+              (make-overlay (car section) (cadr section) nil t nil))))
+    (overlay-put o 'invisible t)
+    (overlay-put o 'evaporate t)
+    (overlay-put o 'face 'multi-translate-section-fold-face)
+    (overlay-put o 'display (propertize
+                             (format "Translate from ‘%s’ to ‘%s’: %s [[...]]"
+                                     (nth 1 query-info)
+                                     (nth 2 query-info)
+                                     (if (< 70 (length (nth 0 query-info)))
+                                         (concat
+                                          (substring (nth 0 query-info) 0 70)
+                                          "...")
+                                       (nth 0 query-info)))
+                             'face 'multi-translate-section-fold-face))))
+
+(defun multi-translate-open-all-translation-section ()
+  "Unfold all translation sections."
+  (interactive)
+  (remove-overlays (point-min) (point-max) 'invisible t))
+
+(defun multi-translate-fold-all-translation-section ()
+  "Fold all translation sections."
+  (interactive)
+  (save-excursion
+    (goto-char (point-min))
+    (multi-translate-fold-translation-section)
+    (while (multi-translate-end-of-translation-section)
+      (multi-translate-fold-translation-section))))
+
+(defun multi-translate--folded-translation-section ()
+  "Return the overlay of folded translation section."
+  (when-let ((ovs (or (overlays-at (point)) (overlays-at (1- (point))))))
+    (car
+     (cl-remove
+      nil
+      (mapcar
+       (lambda (ov)
+         (when (eq (overlay-get ov 'face) 'multi-translate-section-fold-face)
+           ov))
+       ovs)))))
+
+(defun multi-translate-toggle-translation-section ()
+  (interactive)
+  (if-let ((ov (multi-translate--folded-translation-section)))
+      (multi-translate-open-translation-section ov)
+    (multi-translate-fold-translation-section)))
 
 ;;; Dictionary functions
 
@@ -336,12 +542,6 @@ This function is mainly taken from `bing-dict-brief'."
                              sdcv-dictionary-simple-list))
                " "))))
 
-(defun multi-translate-string-nil-p (&rest strings)
-  "Return no-nil if there are nils or empty strings in STRINGS."
-  (remove t (mapcar
-             (lambda (string)
-               (and (stringp string) (not (string-empty-p string))))
-             strings)))
 
 ;;; multi-translate-mode
 
@@ -365,6 +565,14 @@ This function is mainly taken from `bing-dict-brief'."
           (propertize "target" 'face 'error)
           "): "))
 
+(defun multi-translate-clean-buffer ()
+  "Clean multi translate results buffer."
+  (interactive)
+  (if (eq major-mode 'multi-translate-mode)
+      (let ((inhibit-read-only t))
+        (erase-buffer))
+    (message "Not a multi translate buffer.")))
+
 (defun multi-translate--point-at-input-p ()
   (memq 'multi-translate-input-field (text-properties-at (point))))
 
@@ -376,7 +584,8 @@ This function is mainly taken from `bing-dict-brief'."
 
 Return value is in the form of ‘(QUERY-TEXT SOURCE-LANG TARGET-LANG)’."
   (save-excursion
-    (goto-char (point-min))
+    (unless (multi-translate--beginning-of-translate-section-p)
+      (multi-translate-beginning-of-translation-section))
     (let (sl tl beg end)
       (if (catch 'break
             (while t
@@ -449,6 +658,7 @@ Return value is in the form of ‘(QUERY-TEXT SOURCE-LANG TARGET-LANG).’"
 (defvar multi-translate-mode-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "M-RET") #'multi-translate-amend-query)
+    (define-key map (kbd "TAB") #'multi-translate-toggle-translation-section)
     map)
   "Keymap for Multi translate result mode.")
 
@@ -457,6 +667,7 @@ Return value is in the form of ‘(QUERY-TEXT SOURCE-LANG TARGET-LANG).’"
 
 \\{multi-translate-mode-map}"
   (read-only-mode 1)
+  (setq-local inhibit-point-motion-hooks nil)
   (run-hooks 'multi-translate-mode-hook))
 
 ;;;###autoload
@@ -464,10 +675,10 @@ Return value is in the form of ‘(QUERY-TEXT SOURCE-LANG TARGET-LANG).’"
   "Translate TEXT from SOURCE-LANG to TARGET-LANG."
   (interactive
    (pcase-let ((`(,sl . ,tl)
-                 (if (consp multi-translate-language-pair)
-                     multi-translate-language-pair
-                   (funcall multi-translate-language-pair ""))))
-      (multi-translate--read-query-info "" sl tl)))
+                (if (consp multi-translate-language-pair)
+                    multi-translate-language-pair
+                  (funcall multi-translate-language-pair ""))))
+     (multi-translate--read-query-info "" sl tl)))
   (let* ((word? (not (cdr (split-string text " "))))
          (language-pair
           (when (multi-translate-string-nil-p source-lang target-lang)
@@ -479,8 +690,16 @@ Return value is in the form of ‘(QUERY-TEXT SOURCE-LANG TARGET-LANG).’"
          (buffer (or (get-buffer multi-translate-result-buffer-name)
                      (generate-new-buffer multi-translate-result-buffer-name))))
     (with-current-buffer buffer
-      (let ((inhibit-read-only t))
-        (erase-buffer)
+      (let ((inhibit-read-only t)
+            (inhibit-point-motion-hooks t))
+        (if multi-translate-accumulate-results
+            (progn
+              (goto-char (point-max))
+              (unless (= (point) (point-min))
+                (save-excursion
+                  (multi-translate-fold-translation-section))
+                (multi-translate--insert-section-separator)))
+          (erase-buffer))
         (multi-translate--insert-header source-lang
                                         target-lang
                                         text)
@@ -508,10 +727,10 @@ Return value is in the form of ‘(QUERY-TEXT SOURCE-LANG TARGET-LANG).’"
                      text
                      multi-translate-enable-async-request))
                   multi-translate-sentence-backends)))
-        (goto-char (point-min)))
+        (multi-translate-beginning-of-translation-section))
       (unless (eq major-mode 'multi-translate-mode)
         (multi-translate-mode))
-      (if-let (window (get-buffer-window buffer))
+      (if-let ((window (get-buffer-window buffer)))
           (select-window window)
         (switch-to-buffer-other-window buffer)))))
 
@@ -544,7 +763,7 @@ Return value is in the form of ‘(QUERY-TEXT SOURCE-LANG TARGET-LANG).’"
 (defun multi-translate-amend-query ()
   "Amend current query and resubmit it."
   (interactive)
-  (if-let (buffer (get-buffer multi-translate-result-buffer-name))
+  (if-let ((buffer (get-buffer multi-translate-result-buffer-name)))
       (with-current-buffer buffer
         (pcase-let* ((`(,qtext ,sl ,tl)
                       (multi-translate--query-text-and-languages))
