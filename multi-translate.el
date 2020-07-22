@@ -33,6 +33,7 @@
 ;;; Change Log:
 
 ;;  v0.1.0
+;;      * 2020/07/22  Add support for sdcv to translate word locally.
 ;;      * 2020/07/13  Add support for bing/google/youdao.
 ;;      * 2020/07/10  Initial commit.
 
@@ -41,6 +42,7 @@
 (require 'bing-dict)
 (require 'google-translate)
 (require 'youdao-dictionary)
+(require 'sdcv)
 
 (defface multi-translate-dictionary-header
   '((t (:inherit default
@@ -48,6 +50,16 @@
         :weight bold
         :extend t)))
   "Default face for dictionary header."
+  :group 'multi-translate)
+
+(defcustom multi-translate-word-backends '(sdcv)
+  "A list of services for word translating."
+  :type 'list
+  :group 'multi-translate)
+
+(defcustom multi-translate-sentence-backends '(youdao bing google)
+  "A list of services for sentence translating."
+  :type 'list
   :group 'multi-translate)
 
 (defvar multi-translate-from "en"
@@ -114,7 +126,12 @@
   (let* ((fun (format "multi-translate--%s-translation" dictionary))
          (trans (funcall (intern fun) lang-from lang-to text)))
     (goto-char (point-max))
-    (insert trans)))
+    (if (string-empty-p trans)
+        (progn
+          (insert (propertize "No results\n" 'face font-lock-warning-face))
+          nil)
+      (insert trans)
+      t)))
 
 ;;; Dictionary functions
 
@@ -128,11 +145,13 @@
 
 (defun multi-translate--bing-translation (lang-from lang-to text)
   (let ((translation (bing-dict-brief text t)))
-    (concat
-     (if (string-match-p "Machine translation: " translation)
-         (multi-translate--strip-bing-sentence-translation translation text)
-       (multi-translate--format-bing-word-translation translation))
-     "\n")))
+    (if (string= "No results" translation)
+        ""
+      (concat
+       (if (string-match-p "Machine translation: " translation)
+           (multi-translate--strip-bing-sentence-translation translation text)
+         (multi-translate--format-bing-word-translation translation))
+       "\n"))))
 
 (defun multi-translate--google-translation (lang-from lang-to text)
   (let* ((json (google-translate-request lang-from lang-to text))
@@ -151,6 +170,16 @@
                          detailed-definition translation
                          "\n%s\n" "%2d. %s\n"))))))
 
+(defun multi-translate--sdcv-translation (_lang-from _lang-to word)
+  "Return sdcv translation for WORD."
+  (sdcv-filter
+   (shell-command-to-string
+    (mapconcat #'identity
+               (cons "sdcv" (sdcv-search-with-dictionary-args
+                             word
+                             sdcv-dictionary-simple-list))
+               " "))))
+
 ;;;###autoload
 (defun multi-translate-at-point (arg)
   "Translate word or region at point."
@@ -167,27 +196,38 @@
          (bounds (if (region-active-p)
                      (cons (region-beginning) (region-end))
                    (bounds-of-thing-at-point 'word)))
-         (text (buffer-substring-no-properties (car bounds) (cdr bounds)))
+         (text (string-trim (buffer-substring-no-properties (car bounds) (cdr bounds))))
+         (word? (not (cdr (split-string text " "))))
          (buffer (or (get-buffer "*Multi Translate*")
                      (generate-new-buffer "*Multi Translate*"))))
     (with-current-buffer buffer
       (let ((inhibit-read-only t))
         (erase-buffer)
-        (multi-translate--insert-header      translate-from
-                                             translate-to
-                                             text)
-        (multi-translate--insert-translation 'youdao
-                                             translate-from
-                                             translate-to
-                                             text)
-        (multi-translate--insert-translation 'bing
-                                             translate-from
-                                             translate-to
-                                             text)
-        (multi-translate--insert-translation 'google
-                                             translate-from
-                                             translate-to
-                                             text)
+        (multi-translate--insert-header translate-from
+                                        translate-to
+                                        text)
+        (let ((successeds
+               (cl-remove
+                nil
+                (mapcar (lambda (backend)
+                          (multi-translate--insert-translation
+                           backend
+                           translate-from
+                           translate-to
+                           text))
+                        (if word?
+                            multi-translate-word-backends
+                          multi-translate-sentence-backends)))))
+          ;; If the word backends return no results,
+          ;; try the sentence backends.
+          (when (and (not successeds) word?)
+            (mapcar (lambda (backend)
+                      (multi-translate--insert-translation
+                       backend
+                       translate-from
+                       translate-to
+                       text))
+                    multi-translate-sentence-backends)))
         (goto-char (point-min)))
       (view-mode 1)
       (switch-to-buffer-other-window buffer))))
