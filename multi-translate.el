@@ -77,12 +77,15 @@
 (defvar multi-translate-to "zh-CN"
   "Default target language.")
 
-(defun multi-translate--strip-youdao-sentence-translation (translation)
+(defun multi-translate--strip-youdao-translation (translation)
   (with-temp-buffer
     (insert translation)
     (goto-char (point-min))
+    ;; Sentence (avoid repeating in result buffer)
     (if (re-search-forward "\\* Translation\n\\- " nil t)
-        (buffer-substring (point) (point-max)))))
+        (buffer-substring (point) (point-max))
+      ;; Word / compound word
+      (buffer-substring (point-min) (point-max)))))
 
 (defun multi-translate--strip-bing-sentence-translation (translation text)
   (with-temp-buffer
@@ -211,16 +214,14 @@ This function is mainly taken from `bing-dict-brief'."
                     (multi-translate--insert-async-result
                      'youdao
                      ,placeholder
-                     (multi-translate--strip-youdao-sentence-translation
+                     (multi-translate--strip-youdao-translation
                       (youdao-dictionary--format-result
                        (youdao-dictionary--parse-response)))))))
             (youdao-dictionary--format-result
              (youdao-dictionary--request text)))))
     (if placeholder
         (concat placeholder "\n")
-      (concat
-       (or (multi-translate--strip-youdao-sentence-translation translation)
-           translation)))))
+      (multi-translate--strip-youdao-translation translation))))
 
 (defun multi-translate--bing-translation (lang-from lang-to text &optional async-p)
   (let* ((placeholder (when async-p (multi-translate-result-placeholder)))
