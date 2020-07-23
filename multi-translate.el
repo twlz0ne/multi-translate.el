@@ -5,7 +5,7 @@
 ;; Author: Gong Qijian <gongqijian@gmail.com>
 ;; Created: 2020/07/10
 ;; Version: 0.1.0
-;; Package-Requires: ((emacs "24.4"))
+;; Package-Requires: ((emacs "24.4") (bing-dict "20200216.110") (google-translate "0.12") (youdao-dictionary "0.4"))
 ;; URL: https://github.com/twlz0ne/multi-translate.el
 ;; Keywords: tool
 
@@ -33,6 +33,7 @@
 ;;; Change Log:
 
 ;;  v0.1.0
+;;      * 2020/07/22  Add support for async request (bing & youdao).
 ;;      * 2020/07/22  Add support for sdcv to translate word locally.
 ;;      * 2020/07/13  Add support for bing/google/youdao.
 ;;      * 2020/07/10  Initial commit.
@@ -61,6 +62,14 @@
   "A list of services for sentence translating."
   :type 'list
   :group 'multi-translate)
+
+(defcustom multi-translate-enable-async-request t
+  "Whether or not enable async request."
+  :type 'boolean
+  :group 'multi-translate)
+
+(defvar multi-translate-result-buffer-name "*Multi Translate*"
+  "Default name of translate result buffer.")
 
 (defvar multi-translate-from "en"
   "Default source language.")
@@ -118,13 +127,13 @@
             "\n\n"
             text)))
 
-(defun multi-translate--insert-translation (dictionary lang-from lang-to text)
+(defun multi-translate--insert-translation (dictionary lang-from lang-to text &optional async-p)
   (insert "\n"
           (multi-translate--dictionary-header (capitalize
                                                (format "%s" dictionary)))
           "\n")
   (let* ((fun (format "multi-translate--%s-translation" dictionary))
-         (trans (funcall (intern fun) lang-from lang-to text)))
+         (trans (funcall (intern fun) lang-from lang-to text async-p)))
     (goto-char (point-max))
     (if (string-empty-p trans)
         (progn
@@ -133,27 +142,111 @@
       (insert trans)
       t)))
 
+;;; Async helpers
+
+(defun multi-translate-result-placeholder ()
+  "Generate placeholder of translate result."
+  (format "%04x%04x-%04x-%04x-%04x-%06x%06x"
+          (random (expt 16 4))
+          (random (expt 16 4))
+          (random (expt 16 4))
+          (random (expt 16 4))
+          (random (expt 16 4))
+          (random (expt 16 6))
+          (random (expt 16 6))))
+
+(defun multi-translate--insert-async-result (dictionary placeholder result)
+  "Replace PLACEHOLDER with RESULT of DICTIONARY in translation buffer."
+  (save-excursion
+    (let ((inhibit-read-only t))
+      (with-current-buffer multi-translate-result-buffer-name
+        (goto-char (point-min))
+        (if (re-search-forward placeholder nil t)
+            (replace-match (string-trim result))
+          (message "Result placeholder(%s) of %s not found!"
+                   placeholder
+                   dictionary))))))
+
+(defun multi-translate--bing-dict-brief (word &optional callback)
+  "Return the translation of WORD from Bing.
+
+This function is mainly taken from `bing-dict-brief'."
+  (and bing-dict-cache-auto-save
+       (not bing-dict--cache)
+       (bing-dict--cache-load))
+
+  (let ((cached-result (and (listp bing-dict--cache)
+                            (car (assoc-default word bing-dict--cache)))))
+    (if cached-result
+        (progn
+          ;; update cached-result's time
+          (setcdr (assoc-default word bing-dict--cache) (time-to-seconds))
+          (message cached-result))
+      (save-match-data
+        (if (not callback)
+            (with-current-buffer (url-retrieve-synchronously
+                                  (concat bing-dict--base-url
+                                          (url-hexify-string word))
+                                  t t)
+              (bing-dict-brief-cb nil (decode-coding-string word 'utf-8)))
+          (url-retrieve (concat bing-dict--base-url
+                                (url-hexify-string word))
+                        callback
+                        `(,(decode-coding-string word 'utf-8))
+                        t
+                        t))))))
+
 ;;; Dictionary functions
 
-(defun multi-translate--youdao-translation (lang-from lang-to text)
+(defun multi-translate--youdao-translation (lang-from lang-to text &optional async-p)
   (let* ((youdao-dictionary-from lang-from)
          (youdao-dictionary-to lang-to)
-         (translation (youdao-dictionary--format-result text)))
-    (concat
-     (or (multi-translate--strip-youdao-sentence-translation translation)
-         translation))))
-
-(defun multi-translate--bing-translation (lang-from lang-to text)
-  (let ((translation (bing-dict-brief text t)))
-    (if (string= "No results" translation)
-        ""
+         (placeholder (when async-p (multi-translate-result-placeholder)))
+         (translation
+          (if async-p
+              (youdao-dictionary--request
+               text
+               (when async-p
+                 `(lambda (_status)
+                    (multi-translate--insert-async-result
+                     'youdao
+                     ,placeholder
+                     (multi-translate--strip-youdao-sentence-translation
+                      (youdao-dictionary--format-result
+                       (youdao-dictionary--parse-response)))))))
+            (youdao-dictionary--format-result
+             (youdao-dictionary--request text)))))
+    (if placeholder
+        (concat placeholder "\n")
       (concat
-       (if (string-match-p "Machine translation: " translation)
-           (multi-translate--strip-bing-sentence-translation translation text)
-         (multi-translate--format-bing-word-translation translation))
-       "\n"))))
+       (or (multi-translate--strip-youdao-sentence-translation translation)
+           translation)))))
 
-(defun multi-translate--google-translation (lang-from lang-to text)
+(defun multi-translate--bing-translation (lang-from lang-to text &optional async-p)
+  (let* ((placeholder (when async-p (multi-translate-result-placeholder)))
+         (translation
+          (multi-translate--bing-dict-brief
+           text
+           (when async-p
+             `(lambda (status keyword)
+                (let ((result (bing-dict-brief-cb status keyword)))
+                  (multi-translate--insert-async-result
+                   'bing
+                   ,placeholder
+                   (if (string-match-p "Machine translation: " result)
+                       (multi-translate--strip-bing-sentence-translation result ,text)
+                     (multi-translate--format-bing-word-translation result)))))))))
+    (if placeholder
+        (concat placeholder "\n")
+      (if (string= "No results" translation)
+          ""
+        (concat
+         (if (string-match-p "Machine translation: " translation)
+             (multi-translate--strip-bing-sentence-translation translation text)
+           (multi-translate--format-bing-word-translation translation))
+         "\n")))))
+
+(defun multi-translate--google-translation (lang-from lang-to text &optional _async-p)
   (let* ((json (google-translate-request lang-from lang-to text))
          (translation (google-translate-json-translation json))
          (detailed-translation
@@ -170,7 +263,7 @@
                          detailed-definition translation
                          "\n%s\n" "%2d. %s\n"))))))
 
-(defun multi-translate--sdcv-translation (_lang-from _lang-to word)
+(defun multi-translate--sdcv-translation (_lang-from _lang-to word &optional _async-p)
   "Return sdcv translation for WORD."
   (sdcv-filter
    (shell-command-to-string
@@ -198,8 +291,8 @@
                    (bounds-of-thing-at-point 'word)))
          (text (string-trim (buffer-substring-no-properties (car bounds) (cdr bounds))))
          (word? (not (cdr (split-string text " "))))
-         (buffer (or (get-buffer "*Multi Translate*")
-                     (generate-new-buffer "*Multi Translate*"))))
+         (buffer (or (get-buffer multi-translate-result-buffer-name)
+                     (generate-new-buffer multi-translate-result-buffer-name))))
     (with-current-buffer buffer
       (let ((inhibit-read-only t))
         (erase-buffer)
@@ -214,7 +307,8 @@
                            backend
                            translate-from
                            translate-to
-                           text))
+                           text
+                           multi-translate-enable-async-request))
                         (if word?
                             multi-translate-word-backends
                           multi-translate-sentence-backends)))))
@@ -226,7 +320,8 @@
                        backend
                        translate-from
                        translate-to
-                       text))
+                       text
+                       multi-translate-enable-async-request))
                     multi-translate-sentence-backends)))
         (goto-char (point-min)))
       (view-mode 1)
