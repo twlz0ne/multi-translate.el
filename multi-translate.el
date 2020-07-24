@@ -5,7 +5,7 @@
 ;; Author: Gong Qijian <gongqijian@gmail.com>
 ;; Created: 2020/07/10
 ;; Version: 0.1.0
-;; Package-Requires: ((emacs "24.4") (bing-dict "20200216.110") (google-translate "0.12") (youdao-dictionary "0.4"))
+;; Package-Requires: ((emacs "24.4") (bing-dict "20200216.110") (google-translate "0.12") (youdao-dictionary "0.4") (sdcv "1.5.2"))
 ;; URL: https://github.com/twlz0ne/multi-translate.el
 ;; Keywords: tool
 
@@ -25,9 +25,7 @@
 ;;; Commentary:
 
 ;; Translate word or region at point with multiple translation services.
-;;
-;; Currently supports bing/google/youdao.
-;;
+
 ;; See README.md for more information.
 
 ;;; Change Log:
