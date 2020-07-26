@@ -80,6 +80,11 @@ a function that is called with a string and return a cons cell of language names
 (defvar multi-translate-result-buffer-name "*Multi Translate*"
   "Default name of translate result buffer.")
 
+(defvar multi-translate--youdao-language-code-map
+  '(("zh-CN" . "zh-CHS"))
+  "Language code map of youdao dictionary.
+Each item is a cons cell of the form ‘(\"GENERAL-CODE\" . \"YOUDAO-CODE\")’.")
+
 (defun multi-translate--strip-youdao-translation (translation)
   (with-temp-buffer
     (insert translation)
@@ -226,8 +231,12 @@ This function is mainly taken from `bing-dict-brief'."
 ;;; Dictionary functions
 
 (defun multi-translate--youdao-translation (lang-from lang-to text &optional async-p)
-  (let* ((youdao-dictionary-from lang-from)
-         (youdao-dictionary-to lang-to)
+  (let* ((youdao-dictionary-from
+          (or (assoc-default lang-from multi-translate--youdao-language-code-map)
+              lang-from))
+         (youdao-dictionary-to
+          (or (assoc-default lang-to multi-translate--youdao-language-code-map)
+              lang-to))
          (placeholder (when async-p (multi-translate-result-placeholder)))
          (translation
           (if async-p
