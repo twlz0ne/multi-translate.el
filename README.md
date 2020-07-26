@@ -24,6 +24,8 @@ Currently supports bing/google/youdao/sdcv.
 
     This function will translate word or region from source language to target language.
 
+    The source/target languages can be specified by the variable `multi-translate-language-pair`, and also can be manually specified by `C-u`.
+
 ## Use different backends translate words and sentences
 
 Usally, a local dictionary is enough for words translating, only sentences need

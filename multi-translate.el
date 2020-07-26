@@ -66,14 +66,19 @@
   :type 'boolean
   :group 'multi-translate)
 
+(defcustom multi-translate-language-pair #'multi-translate-language-detect-zh-en
+  "A pair of languages.
+Either a cons cell of the form ‘(\"SOURCE-LANGUAGE\" . \"TARGET-LANGUAGE\")’, or
+a function that is called with a string and return a cons cell of language names."
+  :group 'multi-translate
+  :type '(choice
+          (cons :tag "A pair of language names"
+                (string :tag "Source language")
+                (string :tag "Target language"))
+          (function :tag "A function return a pair of language names")))
+
 (defvar multi-translate-result-buffer-name "*Multi Translate*"
   "Default name of translate result buffer.")
-
-(defvar multi-translate-from "en"
-  "Default source language.")
-
-(defvar multi-translate-to "zh-CN"
-  "Default target language.")
 
 (defun multi-translate--strip-youdao-translation (translation)
   (with-temp-buffer
@@ -142,6 +147,27 @@
           nil)
       (insert trans)
       t)))
+
+(defun multi-translate-language-detect-zh-en (string)
+  (let ((zh-words 0) (en-words 0))
+    (with-temp-buffer
+      (insert string)
+      (goto-char (point-min))
+      (while (< (point) (point-max))
+        (let ((ch (char-to-string (char-after))))
+          (cond
+           ((string-match "\\cC" ch)
+            (let ((start-point (point)))
+              (forward-word)
+              (setq zh-words (+ zh-words (- (point) start-point)))))
+           ((string-match "[a-zA-Z]" ch)
+            (forward-word)
+            (setq en-words (1+ en-words)))
+           (t
+            (forward-char))))))
+    (if (< en-words zh-words)
+        (cons "zh-CN" "en")
+      (cons "en" "zh-CN"))))
 
 ;;; Async helpers
 
@@ -276,19 +302,23 @@ This function is mainly taken from `bing-dict-brief'."
 (defun multi-translate-at-point (arg)
   "Translate word or region at point."
   (interactive "P")
-  (let* ((translate-from (if arg
-                             (read-string "Translate from: " multi-translate-from)
-                           multi-translate-from))
+  (let* ((bounds (if (region-active-p)
+                     (cons (region-beginning) (region-end))
+                   (bounds-of-thing-at-point 'word)))
+         (text (string-trim (buffer-substring-no-properties (car bounds) (cdr bounds))))
+         (language-pair
+          (if (consp multi-translate-language-pair)
+              multi-translate-language-pair
+            (funcall multi-translate-language-pair text)))
+         (translate-from (if arg
+                             (read-string "Translate from: " (car language-pair))
+                           (car language-pair)))
          (translate-to (if arg
                            (read-string "Translate to: "
                                         (if (string-prefix-p "zh" translate-from)
                                             "en"
-                                          multi-translate-to))
-                         multi-translate-to))
-         (bounds (if (region-active-p)
-                     (cons (region-beginning) (region-end))
-                   (bounds-of-thing-at-point 'word)))
-         (text (string-trim (buffer-substring-no-properties (car bounds) (cdr bounds))))
+                                          (cdr language-pair)))
+                         (cdr language-pair)))
          (word? (not (cdr (split-string text " "))))
          (buffer (or (get-buffer multi-translate-result-buffer-name)
                      (generate-new-buffer multi-translate-result-buffer-name))))
