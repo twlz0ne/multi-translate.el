@@ -19,12 +19,17 @@ Currently supports bing/google/youdao/sdcv.
 
 ## Usage
 
-- Move cursor onto a word or mark a region.
-- Press `M-x multi-translate-at-point RET`.
+- `multi-translate`
 
-    This function will translate word or region from source language to target language.
+    Translate text from input.
 
-    The source/target languages can be specified by the variable `multi-translate-language-pair`, and also can be manually specified by `C-u`.
+- `multi-translate-at-point`
+
+    Translate word or region.
+
+- `multi-translate-amend-query`
+
+    Amend current query and resubmit it.
 
 ## Use different backends translate words and sentences
 

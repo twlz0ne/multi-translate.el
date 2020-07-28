@@ -31,6 +31,7 @@
 ;;; Change Log:
 
 ;;  v0.1.0
+;;      * 2020/07/28  Add support for amending current query.
 ;;      * 2020/07/22  Add support for async request (bing & youdao).
 ;;      * 2020/07/22  Add support for sdcv to translate word locally.
 ;;      * 2020/07/13  Add support for bing/google/youdao.
@@ -49,6 +50,16 @@
         :weight bold
         :extend t)))
   "Default face for dictionary header."
+  :group 'multi-translate)
+
+(defface multi-translate-language
+  '((t (:inherit font-lock-keyword-face)))
+  "Default face for source/target language."
+  :group 'multi-translate)
+
+(defface multi-translate-input-field
+  '((t (:inherit widget-field)))
+  "Default face for input field."
   :group 'multi-translate)
 
 (defcustom multi-translate-word-backends '(sdcv)
@@ -79,6 +90,31 @@ a function that is called with a string and return a cons cell of language names
 
 (defvar multi-translate-result-buffer-name "*Multi Translate*"
   "Default name of translate result buffer.")
+
+(defun multi-translate--generate-minibuffer-tooltip (key-desc-lists)
+  "Generate propertized help doc KEY-DESC-LISTS from for minibuffer.
+
+Each item of KEY-DESC-LISTS is a list of the form:
+
+    (KEY-STR BRIEF)
+
+or:
+
+    ((KEY-STR1 KEY-STR2) BRIEF)"
+  (string-join
+   (mapcar (pcase-lambda (`(,key ,desc))
+             (concat
+              (if (consp key)
+                  (string-join
+                   (mapcar
+                    (lambda (key)
+                      (propertize key 'face 'error))
+                    key)
+                   "/")
+                (propertize key 'face 'error))
+              ": " desc))
+           key-desc-lists)
+   ", "))
 
 (defvar multi-translate--youdao-language-code-map
   '(("zh-CN" . "zh-CHS"))
@@ -126,17 +162,18 @@ Each item is a cons cell of the form ‘(\"GENERAL-CODE\" . \"YOUDAO-CODE\")’.
 (defun multi-translate--insert-header (lang-from lang-to text)
   (let ((text (concat text "\n")))
     (put-text-property 0 (length lang-from)
-                       'face 'font-lock-keyword-face
+                       'face 'multi-translate-language
                        lang-from)
     (put-text-property 0 (length lang-to)
-                       'face 'font-lock-keyword-face
+                       'face 'multi-translate-language
                        lang-to)
     (put-text-property 0 (length text)
-                       'face 'widget-field
+                       'face 'multi-translate-input-field
                        text)
     (insert (format "Translate from ‘%s’ to ‘%s’:" lang-from lang-to)
             "\n\n"
-            text)))
+            text)
+    ))
 
 (defun multi-translate--insert-translation (dictionary lang-from lang-to text &optional async-p)
   (insert "\n"
@@ -307,6 +344,185 @@ This function is mainly taken from `bing-dict-brief'."
                              sdcv-dictionary-simple-list))
                " "))))
 
+(defun multi-translate-string-nil-p (&rest strings)
+  "Return no-nil if there are nils or empty strings in STRINGS."
+  (remove t (mapcar
+             (lambda (string)
+               (and (stringp string) (not (string-empty-p string))))
+             strings)))
+
+;;; multi-translate-mode
+
+(defvar multi-translate--query-edit-tooltip
+  (concat "Action: "
+          (multi-translate--generate-minibuffer-tooltip
+           '(("RET"         "commit")
+             (("TAB" "M-o") "change/swap language")
+             ("C-g"         "abort")))))
+
+(defvar multi-translate--input-edit-prompt
+  "Translate (%S -> %S): ")
+
+(defvar multi-translate--sl-read-prompt
+  (concat "Language ("
+          (propertize "source" 'face 'error)
+          " -> target): "))
+
+(defvar multi-translate--tl-read-prompt
+  (concat "Language (%S -> "
+          (propertize "target" 'face 'error)
+          "): "))
+
+(defun multi-translate--point-at-input-p ()
+  (memq 'multi-translate-input-field (text-properties-at (point))))
+
+(defun multi-translate--point-at-language-p ()
+  (memq 'multi-translate-language (text-properties-at (point))))
+
+(defun multi-translate--query-text-and-languages ()
+  "Return current query info.
+
+Return value is in the form of ‘(QUERY-TEXT SOURCE-LANG TARGET-LANG)’."
+  (save-excursion
+    (goto-char (point-min))
+    (let (sl tl beg end)
+      (if (catch 'break
+            (while t
+              (cond
+               ((and (not sl) (multi-translate--point-at-language-p))
+                (setq sl (thing-at-point 'symbol t)))
+               ((and (not tl) (multi-translate--point-at-language-p))
+                (setq tl (thing-at-point 'symbol t)))
+               ((and (not beg) (multi-translate--point-at-input-p))
+                (setq beg (point)))
+               ((and beg (not end)) (setq end (1- (point))))
+               ((and beg end) (throw 'break t)))
+              (condition-case _err
+                  (goto-char (next-property-change (point)))
+                (error 'wrong-type-argument (throw 'break nil)))))
+          (list (buffer-substring-no-properties beg end) sl tl)))))
+
+(defun multi-translate--read-query-info (&optional qtext sl tl)
+  "Read query info from minibuffer.
+
+QTEXT   default query text
+SL      default source language
+TL      default target language
+
+Return value is in the form of ‘(QUERY-TEXT SOURCE-LANG TARGET-LANG).’"
+  (let ((map (copy-keymap minibuffer-local-map))
+        (state 'EDIT-QTEXT)
+        new-sl
+        new-tl
+        new-text)
+    (unwind-protect
+        (progn
+          (while (eq state 'EDIT-QTEXT)
+            (minibuffer-with-setup-hook
+                (lambda ()
+                  (setq state nil)
+                  (eldoc-minibuffer-message multi-translate--query-edit-tooltip)
+                  (define-key minibuffer-local-map
+                    (kbd "TAB")
+                    (lambda ()
+                      (interactive)
+                      (setq state 'CHANGE-LANGS)
+                      (exit-minibuffer)))
+                  (define-key minibuffer-local-map
+                    (kbd "M-o")
+                    (lambda ()
+                      (interactive)
+                      (setq sl (prog1 tl (setq tl sl)))
+                      (setq qtext (minibuffer-contents))
+                      (setq state 'EDIT-QTEXT)
+                      (exit-minibuffer))))
+              (setq new-text (read-string
+                              (format multi-translate--input-edit-prompt sl tl)
+                              qtext))))
+          (when (eq state 'CHANGE-LANGS)
+            (setq new-sl (read-string multi-translate--sl-read-prompt sl))
+            (setq new-tl (read-string
+                          (format multi-translate--tl-read-prompt new-sl)
+                          (if (string= new-sl tl) ;; keep different
+                              sl
+                            tl)))))
+      (setq minibuffer-local-map map))
+    (list new-text new-sl new-tl)))
+
+(defcustom multi-translate-mode-hook '()
+  "Multi translate mode hook."
+  :type 'hook
+  :group 'multi-translate)
+
+(defvar multi-translate-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "M-RET") #'multi-translate-amend-query)
+    map)
+  "Keymap for Multi translate result mode.")
+
+(define-derived-mode multi-translate-mode fundamental-mode "Multi translate"
+  "Major mode for muti-translate buffer.
+
+\\{multi-translate-mode-map}"
+  (read-only-mode 1)
+  (run-hooks 'multi-translate-mode-hook))
+
+;;;###autoload
+(defun multi-translate (text &optional source-lang target-lang)
+  "Translate TEXT from SOURCE-LANG to TARGET-LANG."
+  (interactive
+   (pcase-let ((`(,sl . ,tl)
+                 (if (consp multi-translate-language-pair)
+                     multi-translate-language-pair
+                   (funcall multi-translate-language-pair ""))))
+      (multi-translate--read-query-info "" sl tl)))
+  (let* ((word? (not (cdr (split-string text " "))))
+         (language-pair
+          (when (multi-translate-string-nil-p source-lang target-lang)
+            (if (consp multi-translate-language-pair)
+                multi-translate-language-pair
+              (funcall multi-translate-language-pair text))))
+         (source-lang (or source-lang (car language-pair)))
+         (target-lang (or target-lang (cdr language-pair)))
+         (buffer (or (get-buffer multi-translate-result-buffer-name)
+                     (generate-new-buffer multi-translate-result-buffer-name))))
+    (with-current-buffer buffer
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (multi-translate--insert-header source-lang
+                                        target-lang
+                                        text)
+        (let ((successeds
+               (cl-remove
+                nil
+                (mapcar (lambda (backend)
+                          (multi-translate--insert-translation
+                           backend
+                           source-lang
+                           target-lang
+                           text
+                           multi-translate-enable-async-request))
+                        (if word?
+                            multi-translate-word-backends
+                          multi-translate-sentence-backends)))))
+          ;; If the word backends return no results,
+          ;; try the sentence backends.
+          (when (and (not successeds) word?)
+            (mapcar (lambda (backend)
+                      (multi-translate--insert-translation
+                       backend
+                       source-lang
+                       target-lang
+                       text
+                       multi-translate-enable-async-request))
+                    multi-translate-sentence-backends)))
+        (goto-char (point-min)))
+      (unless (eq major-mode 'multi-translate-mode)
+        (multi-translate-mode))
+      (if-let (window (get-buffer-window buffer))
+          (select-window window)
+        (switch-to-buffer-other-window buffer)))))
+
 ;;;###autoload
 (defun multi-translate-at-point (arg)
   "Translate word or region at point."
@@ -319,51 +535,44 @@ This function is mainly taken from `bing-dict-brief'."
           (if (consp multi-translate-language-pair)
               multi-translate-language-pair
             (funcall multi-translate-language-pair text)))
-         (translate-from (if arg
-                             (read-string "Translate from: " (car language-pair))
-                           (car language-pair)))
-         (translate-to (if arg
-                           (read-string "Translate to: "
-                                        (if (string-prefix-p "zh" translate-from)
-                                            "en"
-                                          (cdr language-pair)))
-                         (cdr language-pair)))
-         (word? (not (cdr (split-string text " "))))
-         (buffer (or (get-buffer multi-translate-result-buffer-name)
-                     (generate-new-buffer multi-translate-result-buffer-name))))
-    (with-current-buffer buffer
-      (let ((inhibit-read-only t))
-        (erase-buffer)
-        (multi-translate--insert-header translate-from
-                                        translate-to
-                                        text)
-        (let ((successeds
-               (cl-remove
-                nil
-                (mapcar (lambda (backend)
-                          (multi-translate--insert-translation
-                           backend
-                           translate-from
-                           translate-to
-                           text
-                           multi-translate-enable-async-request))
-                        (if word?
-                            multi-translate-word-backends
-                          multi-translate-sentence-backends)))))
-          ;; If the word backends return no results,
-          ;; try the sentence backends.
-          (when (and (not successeds) word?)
-            (mapcar (lambda (backend)
-                      (multi-translate--insert-translation
-                       backend
-                       translate-from
-                       translate-to
-                       text
-                       multi-translate-enable-async-request))
-                    multi-translate-sentence-backends)))
-        (goto-char (point-min)))
-      (view-mode 1)
-      (switch-to-buffer-other-window buffer))))
+         (source-lang (if arg
+                          (read-string
+                           multi-translate--sl-read-prompt (car language-pair))
+                        (car language-pair)))
+         (target-lang (if arg
+                          (read-string
+                           (format multi-translate--tl-read-prompt source-lang)
+                           (if (string-prefix-p "zh" source-lang)
+                               "en"
+                             (cdr language-pair)))
+                        (cdr language-pair))))
+    (multi-translate text source-lang target-lang)))
+
+;;;###autoload
+(defun multi-translate-amend-query ()
+  "Amend current query and resubmit it."
+  (interactive)
+  (if-let (buffer (get-buffer multi-translate-result-buffer-name))
+      (with-current-buffer buffer
+        (pcase-let* ((`(,qtext ,sl ,tl)
+                      (multi-translate--query-text-and-languages))
+                     (`(,new-text ,new-sl ,new-tl)
+                      (multi-translate--read-query-info qtext sl tl)))
+          (let ((language-pair
+                 (if (multi-translate-string-nil-p new-sl new-tl)
+                     (if (functionp multi-translate-language-pair)
+                         (let ((auto-langs
+                                (funcall multi-translate-language-pair new-text)))
+                           (cons (if (string-empty-p new-sl)
+                                     (car auto-langs)
+                                   new-sl)
+                                 (if (string-empty-p new-tl)
+                                     (cdr auto-langs)
+                                   new-tl)))
+                       multi-translate-language-pair)
+                   (cons new-sl new-tl))))
+            (multi-translate new-text (car language-pair) (cdr language-pair)))))
+    (message "No query is found.")))
 
 (provide 'multi-translate)
 
