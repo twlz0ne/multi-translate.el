@@ -285,7 +285,7 @@ This function is mainly taken from `bing-dict-brief'."
         (concat placeholder "\n")
       (multi-translate--strip-youdao-translation translation))))
 
-(defun multi-translate--bing-translation (lang-from lang-to text &optional async-p)
+(defun multi-translate--bing-translation (_lang-from _lang-to text &optional async-p)
   (let* ((placeholder (when async-p (multi-translate-result-placeholder)))
          (translation
           (multi-translate--bing-dict-brief
@@ -500,14 +500,14 @@ Return value is in the form of ‘(QUERY-TEXT SOURCE-LANG TARGET-LANG).’"
           ;; If the word backends return no results,
           ;; try the sentence backends.
           (when (and (not successeds) word?)
-            (mapcar (lambda (backend)
-                      (multi-translate--insert-translation
-                       backend
-                       source-lang
-                       target-lang
-                       text
-                       multi-translate-enable-async-request))
-                    multi-translate-sentence-backends)))
+            (mapc (lambda (backend)
+                    (multi-translate--insert-translation
+                     backend
+                     source-lang
+                     target-lang
+                     text
+                     multi-translate-enable-async-request))
+                  multi-translate-sentence-backends)))
         (goto-char (point-min)))
       (unless (eq major-mode 'multi-translate-mode)
         (multi-translate-mode))
