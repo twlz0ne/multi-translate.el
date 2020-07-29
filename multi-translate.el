@@ -160,20 +160,12 @@ Each item is a cons cell of the form ‘(\"GENERAL-CODE\" . \"YOUDAO-CODE\")’.
     header))
 
 (defun multi-translate--insert-header (lang-from lang-to text)
-  (let ((text (concat text "\n")))
-    (put-text-property 0 (length lang-from)
-                       'face 'multi-translate-language
-                       lang-from)
-    (put-text-property 0 (length lang-to)
-                       'face 'multi-translate-language
-                       lang-to)
-    (put-text-property 0 (length text)
-                       'face 'multi-translate-input-field
-                       text)
-    (insert (format "Translate from ‘%s’ to ‘%s’:" lang-from lang-to)
-            "\n\n"
-            text)
-    ))
+  (insert
+   (format "Translate from ‘%s’ to ‘%s’:"
+           (propertize lang-from 'face 'multi-translate-language)
+           (propertize lang-to   'face 'multi-translate-language))
+   "\n\n"
+   (propertize (concat text "\n") 'face 'multi-translate-input-field)))
 
 (defun multi-translate--insert-translation (dictionary lang-from lang-to text &optional async-p)
   (insert "\n"
