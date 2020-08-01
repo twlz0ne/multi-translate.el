@@ -407,38 +407,48 @@ Return value is in the form of ‘(QUERY-TEXT SOURCE-LANG TARGET-LANG).’"
         new-sl
         new-tl
         new-text)
-    (unwind-protect
-        (progn
-          (while (eq state 'EDIT-QTEXT)
-            (minibuffer-with-setup-hook
-                (lambda ()
-                  (setq state nil)
-                  (eldoc-minibuffer-message multi-translate--query-edit-tooltip)
-                  (define-key minibuffer-local-map
-                    (kbd "TAB")
-                    (lambda ()
-                      (interactive)
-                      (setq state 'CHANGE-LANGS)
-                      (exit-minibuffer)))
-                  (define-key minibuffer-local-map
-                    (kbd "M-o")
-                    (lambda ()
-                      (interactive)
-                      (setq sl (prog1 tl (setq tl sl)))
-                      (setq qtext (minibuffer-contents))
-                      (setq state 'EDIT-QTEXT)
-                      (exit-minibuffer))))
-              (setq new-text (read-string
-                              (format multi-translate--input-edit-prompt sl tl)
-                              qtext))))
-          (when (eq state 'CHANGE-LANGS)
-            (setq new-sl (read-string multi-translate--sl-read-prompt sl))
-            (setq new-tl (read-string
-                          (format multi-translate--tl-read-prompt new-sl)
-                          (if (string= new-sl tl) ;; keep different
-                              sl
-                            tl)))))
-      (setq minibuffer-local-map map))
+    (while (eq state 'EDIT-QTEXT)
+      (minibuffer-with-setup-hook
+          (lambda ()
+            (setq state nil)
+            (use-local-map map)
+            (eldoc-minibuffer-message multi-translate--query-edit-tooltip)
+            (define-key map
+              (kbd "TAB")
+              (lambda ()
+                (interactive)
+                (setq state 'CHANGE-LANGS)
+                (exit-minibuffer)))
+            (define-key map
+              (kbd "M-o")
+              (lambda ()
+                (interactive)
+                (setq sl (prog1 tl (setq tl sl)))
+                (setq new-sl sl)
+                (setq new-tl tl)
+                (setq qtext (minibuffer-contents))
+                (setq state 'EDIT-QTEXT)
+                (exit-minibuffer))))
+        (setq new-text (read-string
+                        (format multi-translate--input-edit-prompt sl tl)
+                        qtext))))
+    (when (eq state 'CHANGE-LANGS)
+      (minibuffer-with-setup-hook
+          (lambda ()
+            (use-local-map map)
+            (define-key map (kbd "TAB") #'exit-minibuffer)
+            (define-key map (kbd "M-o") nil))
+        (setq new-sl (read-string multi-translate--sl-read-prompt sl)))
+      (minibuffer-with-setup-hook
+          (lambda ()
+            (use-local-map map)
+            (define-key map (kbd "TAB") #'exit-minibuffer)
+            (define-key map (kbd "M-o") nil))
+        (setq new-tl (read-string
+                      (format multi-translate--tl-read-prompt new-sl)
+                      (if (string= new-sl tl) ;; keep different
+                          sl
+                        tl)))))
     (list new-text new-sl new-tl)))
 
 (defcustom multi-translate-mode-hook '()
