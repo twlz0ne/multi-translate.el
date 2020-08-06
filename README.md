@@ -49,3 +49,29 @@ The async request is enabled by default (see `multi-translate-enable-async-reque
 | google([google-translate](https://github.com/atykhonov/google-translate))       | No                 |
 | youdao([youdao-dictionary](https://github.com/xuchunyang/youdao-dictionary.el)) | Yes                |
 | sdcv([sdcv](http://www.emacswiki.org/emacs/download/sdcv.el))                   | No (not necessary) |
+
+## Accumulate translate results
+
+- `multi-translate-accumulate-results`
+
+    Whether or not to accumulate translate results (default `nil`).
+
+- `multi-translate-toggle-translation-section`
+
+    Toggle current translation section hiding or showing.
+
+- `multi-translate-{fold, open}-all-translation-section`
+
+    Fold/open all translation sections.
+
+- `multi-translate-{prev, next}-translation-section`
+
+    Previous/next translation section
+
+- `multi-translate-clean-buffer`
+
+    Remove all translate results.
+
+- Imenu support
+
+    Navigate to different sections quickly.
