@@ -40,6 +40,7 @@
 
 ;;; Code:
 
+(require 'imenu)
 (require 'bing-dict)
 (require 'google-translate)
 (require 'youdao-dictionary)
@@ -542,6 +543,64 @@ Return the new point or nil if at the end of buffer."
                              sdcv-dictionary-simple-list))
                " "))))
 
+;;; Imenu
+
+(defface multi-translate-imenu-goto-item-face
+  '((t (:inherit isearch)))
+  "Face for imenu goto item."
+  :group 'multi-translate)
+
+(defvar multi-translate-imenu-generic-expression
+  '(("Query"
+     "^Translate from ‘\\(?:[^’]*\\)’ to ‘\\(?:[^’]*\\)’:\n\n\\(.*\\)"
+     1)))
+
+(defsubst multi-translate--imenu-delete-overlay (identity &optional beg end)
+  "Delete overlay if IDENTITY has in BEG to END."
+  (overlay-recenter (or end (point-max)))
+  (mapc (lambda (ov)
+          (if (overlay-get ov identity)
+              (delete-overlay ov)))
+        (overlays-in (or beg (point-min)) (or end (point-max)))))
+
+(defun multi-translate--imenu-flash-line (match-beg match-end)
+  "Flash words in MATCH-BEG to MATCH-END."
+  (interactive)
+  (unwind-protect
+      (let ((ov-last (get 'multi-translate--imenu-flash-line 'overlay))
+            (ov (or (multi-translate--folded-translation-section)
+                    (make-overlay match-beg match-end))))
+        (when ov-last
+          (delete-overlay ov-last))
+        (when ov
+          (overlay-put ov 'face 'multi-translate-imenu-goto-item-face)
+          (overlay-put ov 'multi-translate-imenu-goto-item t)
+          (put 'multi-translate--imenu-flash-line 'overlay ov)))
+    (run-with-idle-timer
+     0.6 nil (lambda ()
+               (multi-translate--imenu-delete-overlay 'multi-translate-imenu-goto-item)))))
+
+(defun multi-translate--imenu-goto-function (name position &rest rest)
+  (funcall #'imenu-default-goto-function name position rest)
+  (let ((pos (marker-position position)))
+    (save-excursion
+      (goto-char pos)
+      (multi-translate--imenu-flash-line pos (point-at-eol)))))
+
+(defun multi-translate--imenu-index-function ()
+  "Default function to create an index alist of the multi translate buffer."
+  (pcase-let ((matches nil)
+              (inhibit-point-motion-hooks t)
+              (`((,title ,reg ,n)) multi-translate-imenu-generic-expression))
+    (goto-char (point-max))
+    (while (re-search-backward reg nil t)
+      (push (cons
+             (match-string-no-properties n) (copy-marker (match-beginning n)))
+            matches))
+    (list (append (list title)
+                  (if matches
+                      matches
+                    (list 'dummy))))))
 
 ;;; multi-translate-mode
 
@@ -667,6 +726,9 @@ Return value is in the form of ‘(QUERY-TEXT SOURCE-LANG TARGET-LANG).’"
 
 \\{multi-translate-mode-map}"
   (read-only-mode 1)
+  (setq-local imenu-default-goto-function #'multi-translate--imenu-goto-function)
+  (setq-local imenu-create-index-function #'multi-translate--imenu-index-function)
+  (setq-local imenu-generic-expression multi-translate-imenu-generic-expression)
   (setq-local inhibit-point-motion-hooks nil)
   (run-hooks 'multi-translate-mode-hook))
 

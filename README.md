@@ -71,3 +71,7 @@ The async request is enabled by default (see `multi-translate-enable-async-reque
 - `multi-translate-clean-buffer`
 
     Remove all translate results.
+
+- Imenu support
+
+    Navigate to different sections quickly.
